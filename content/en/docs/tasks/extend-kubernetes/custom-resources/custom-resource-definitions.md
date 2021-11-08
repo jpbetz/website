@@ -494,6 +494,7 @@ It is possible to specify those embedded objects (both completely without constr
 type: object
 properties:
   foo:
+    type: object
     x-kubernetes-embedded-resource: true
     x-kubernetes-preserve-unknown-fields: true
 ```
@@ -511,6 +512,98 @@ foo:
 Because `x-kubernetes-preserve-unknown-fields: true` is specified alongside, nothing is pruned. The use of `x-kubernetes-preserve-unknown-fields: true` is optional though.
 
 With `x-kubernetes-embedded-resource: true`, the `apiVersion`, `kind` and `metadata` are implicitly specified and validated.
+
+### Validator Rules
+
+{{< feature-state for_k8s_version="v1.23" state="alpha" >}}
+
+Custom resources can be validated using the [CEL expression language](https://github.com/google/cel-spec) by adding
+validation rules in a Custom Resource Definition's OpenAPIv3 schema using the `x-kubernetes-validations` extension.
+
+Validation rules use the `self` variable to identify the value that the validation rule is scoped to. For
+example, when a validation rule is on a string type, `self` refers to the string value being validated:
+
+```yaml
+type: object
+properties:
+  foo:
+    x-kubernetes-validations:
+	- rule: "self.startsWith('kube')"
+    type: string
+```
+
+When `x-kubernetes-validations` is set on a container type (e.g. an object, map, or array), the
+validation rule may use field selection and indexing to access all values contained under that
+type. For example, multiple object properties can be referenced in a single rule:
+
+```yaml
+type: object
+x-kubernetes-validations:
+- rule: 'self.minReplicas <= self.replicas <= self.maxReplicas'
+properties:
+  replicas:
+    type: int
+  minReplicas:
+    type: int
+  maxReplicas:
+    type: int
+```
+
+`self` can usually be omitted when selecting fields of an object, allowing the above rule to be
+written as `minReplicas <= replicas <= maxReplicas`. `self` is required if the field name is one of
+reserved identifiers in the CEL language, (or the field name is `self`): `int`, `uint`, `double`,
+`bool`, `string`, `bytes`, `list`, `map`, `null_type`, `type`, `self`.
+
+CEL reserved symbol must be escaped. The reserved symbols are: `true`, `false`, `null`, `in`, `as`,
+`break`, `const`, `continue`, `else`, `for`, `function`, `if`, `import`, `let`, `loop`, `package`,
+`namespace`, `return`, `var`, `void`, `while`.
+
+The escaping rules are:
+
+- When a property name is a CEL reserved symbol, it is identified in validator rules with a `_` prefix. E.g. the
+`namespace` property is identified in validation rules as `_namespace`.
+- When a property name starts with one or more `_`s it is identified in validator rules with N+1 `_`s. E.g. the
+`_while` property is identified in validation rules as `__while`.
+
+Validation rules may only access values that are declared in the schema. Values not in the schema but preserved using
+`x-kubernetes-preserve-unknown-fields: true` cannot be accessed in validation rules. `apiVersion`, `kind` and `metadata`
+can only be accessed if the schema includes the schema information for these fields, both for the root object and 
+for `x-kubernetes-embedded-resource: true`.
+
+CELs standard library of macros and functions are supported. This includes:
+
+- `has` to check if a property is set (e.g. `has(spec.replicas)`)
+- `size` to check the number of elements in an array, entries of a map or characters of a string.
+- `all` to apply a comprehension to all elements of an array or all keys of a map (e.g. `mylist.all(element, element < 1000)`)
+- `exists`/`exists_one` to check if a condition is true for at least/exactly one element in an array or key in a map (e.g. `mymap.exists(k, k == "cpu")`)
+- `filter` to returns the subset of all elements of an array or all keys of a map where a condition is true (e.g. `mylist.filter(element, element % 2 == 0)`)
+- `contains`/`startsWith`/`endsWith` to check if a string contains/is prefixed with/is suffixed with a substring.
+- `matches` to check if a string matches a regular expression.
+- Date and time functions. See [CEL Language Definition](https://github.com/google/cel-spec/blob/master/doc/langdef.md) for details.
+- An extended string library. See [gel-go Strings library](https://github.com/google/cel-go/blob/master/ext/strings.go) for details.
+
+Types are mapped from OpenAPIv3 to CEL according to this table:
+
+| OpenAPIv3 type                                     | CEL type                                                                |
+| -------------------------------------------------- | ----------------------------------------------------------------------- |
+| 'boolean'                                          | boolean                                                                 |
+| 'number' (all formats)                             | double                                                                  |
+| 'integer' (all formats)                            | int (64)                                                                |
+| 'null'                                             | null_type                                                               |
+| 'string'                                           | string                                                                  |
+| 'string' with format=byte                          | string (containing base64 encoded data)                                 |
+| 'string' with format=binary                        | bytes                                                                   |
+| 'string' with format=date                          | timestamp (google.protobuf.Timestamp)                                   |
+| 'string' with format=datetime                      | timestamp (google.protobuf.Timestamp)                                   |
+| 'string' with format=duration                      | duration (google.protobuf.Duration)                                     |
+| 'object' with Properties                           | object / "message type"                                                 |
+| 'object' with AdditionalProperties                 | map                                                                     |
+| 'array                                             | list                                                                    |
+| 'array' with x-kubernetes-list-type=map            | list with map based Equality & unique key guarantees                    |
+| 'array' with x-kubernetes-list-type=set            | list with set based Equality & unique entry guarantees                  |
+| x-kubernetes-embedded-int-or-string                | object with 'intVal' (type: int) and 'strVal' (type: string) fields     |
+| x-kubernetes-embedded-type                         | <only fields declared in schema are accessible to validator rules>      |
+| x-kubernetes-preserve-unknown-fields               | <only fields declared in schema are accessible to validator rules>      |
 
 ## Serving multiple versions of a CRD
 
@@ -948,6 +1041,7 @@ A column's `format` field can be any of the following:
 - `byte`
 - `date`
 - `date-time`
+- `duration`
 - `password`
 
 The column's `format` controls the style used when `kubectl` prints the value.
